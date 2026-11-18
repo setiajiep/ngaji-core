@@ -1,0 +1,188 @@
+#!/usr/bin/env python3
+"""
+ngaji CLI — Mesin Pencari & Pengkajian Al-Qur'an, Hadits & Kaidah Fikih
+Mendukung SQLite FTS5 (Super-Fast Sub-5ms) untuk Android Termux & Linux.
+"""
+import sys
+import os
+import sqlite3
+import argparse
+
+# Path default database di Termux atau Linux
+DB_PATH = os.environ.get("NGAJI_DB_PATH") or os.path.expanduser("~/.ngaji/ngaji.db")
+if not os.path.exists(DB_PATH):
+    # Cek folder lokal jika dijalankan di repo ngaji-core
+    local_db = os.path.join(os.path.dirname(os.path.abspath(__file__)), "ngaji.db")
+    if os.path.exists(local_db):
+        DB_PATH = local_db
+
+def get_db():
+    if not os.path.exists(DB_PATH):
+        print(f"Error: Database ngaji.db tidak ditemukan di {DB_PATH}")
+        print("Silakan jalankan: ngaji download-db")
+        sys.exit(1)
+    conn = sqlite3.connect(DB_PATH)
+    conn.row_factory = sqlite3.Row
+    return conn
+
+def cmd_cari_hadits(args):
+    db = get_db()
+    c = db.cursor()
+    query = args.keyword.replace("'", "''")
+    limit = args.limit or 5
+    
+    sql = f"""
+    SELECT collection_name, hadith_number, matn_ar, translation_id,
+           snippet(hadiths_fts, 4, '\033[1;33m', '\033[0m', '...', 12) as snip
+    FROM hadiths_fts
+    WHERE hadiths_fts MATCH ?
+    LIMIT ?;
+    """
+    c.execute(sql, (query, limit))
+    rows = c.fetchall()
+    
+    if not rows:
+        print(f"[-] Tidak ditemukan hadits dengan kata kunci: '{args.keyword}'")
+        return
+
+    print(f"\n=== HASIL PENCARIAN HADITS ({len(rows)} Ditemukan) ===")
+    for idx, r in enumerate(rows, 1):
+        print(f"\n[{idx}] 📖 {r['collection_name']} (No. {r['hadith_number']})")
+        print(f"Matan: {r['matn_ar'][:150]}...")
+        print(f"Arti : {r['snip']}")
+
+def cmd_baca_hadits(args):
+    db = get_db()
+    c = db.cursor()
+    slug_part = args.kitab.lower()
+    
+    c.execute("""
+    SELECT collection_name, hadith_number, chapter_title, matn_ar, translation_id
+    FROM hadiths
+    WHERE (collection_slug LIKE ? OR lower(collection_name) LIKE ?) AND hadith_number = ?
+    LIMIT 1;
+    """, (f"%{slug_part}%", f"%{slug_part}%", args.nomor))
+    
+    r = c.fetchone()
+    if not r:
+        print(f"[-] Hadits tidak ditemukan untuk {args.kitab} No. {args.nomor}")
+        return
+
+    print("\n" + "="*70)
+    print(f"📖 {r['collection_name'].upper()} — NO. {r['hadith_number']}")
+    if r['chapter_title']:
+        print(f"Bab : {r['chapter_title']}")
+    print("="*70)
+    print(f"\n{r['matn_ar']}\n")
+    print("-" * 70)
+    print(f"Artinya:\n\"{r['translation_id']}\"\n")
+    print("="*70)
+
+def cmd_baca_quran(args):
+    db = get_db()
+    c = db.cursor()
+    c.execute("""
+    SELECT s.name_latin, s.name_arabic, a.surah_number, a.ayah_number, a.text_uthmani, a.translation_id, a.juz_number
+    FROM quran_ayahs a
+    JOIN quran_surahs s ON a.surah_number = s.surah_number
+    WHERE a.surah_number = ? AND a.ayah_number = ?;
+    """, (args.surah, args.ayat))
+    
+    r = c.fetchone()
+    if not r:
+        print(f"[-] Ayat tidak ditemukan untuk Surah {args.surah} Ayat {args.ayat}")
+        return
+
+    print("\n" + "="*70)
+    print(f"📖 QS. {r['name_latin']} ({r['name_arabic']}) : {r['ayah_number']} [Juz {r['juz_number']}]")
+    print("="*70)
+    print(f"\n{r['text_uthmani']}\n")
+    print("-" * 70)
+    print(f"Terjemahan:\n\"{r['translation_id']}\"\n")
+    print("="*70)
+
+def cmd_cari_quran(args):
+    db = get_db()
+    c = db.cursor()
+    sql = """
+    SELECT q.surah_number, q.ayah_number, s.name_latin, q.text_uthmani,
+           snippet(quran_fts, 3, '\033[1;33m', '\033[0m', '...', 15) as snip
+    FROM quran_fts q
+    JOIN quran_surahs s ON q.surah_number = s.surah_number
+    WHERE quran_fts MATCH ?
+    LIMIT ?;
+    """
+    c.execute(sql, (args.keyword, args.limit or 5))
+    rows = c.fetchall()
+    if not rows:
+        print(f"[-] Tidak ditemukan ayat dengan kata kunci: '{args.keyword}'")
+        return
+        
+    print(f"\n=== HASIL PENCARIAN AL-QUR'AN ({len(rows)} Ditemukan) ===")
+    for idx, r in enumerate(rows, 1):
+        print(f"\n[{idx}] 📖 QS. {r['name_latin']} : Ayat {r['ayah_number']}")
+        print(f"Ayat: {r['text_uthmani']}")
+        print(f"Arti: {r['snip']}")
+
+def cmd_qawaid(args):
+    db = get_db()
+    c = db.cursor()
+    if args.keyword:
+        c.execute("""
+        SELECT code, category, qaidah_ar, translation_id, source_book, explanation_id
+        FROM fiqh_qawaid
+        WHERE translation_id LIKE ? OR qaidah_ar LIKE ? OR explanation_id LIKE ?;
+        """, (f"%{args.keyword}%", f"%{args.keyword}%", f"%{args.keyword}%"))
+    else:
+        c.execute("SELECT code, category, qaidah_ar, translation_id, source_book, explanation_id FROM fiqh_qawaid;")
+    
+    rows = c.fetchall()
+    print(f"\n=== KAIDAH FIKIH ({len(rows)} Ditemukan) ===")
+    for r in rows:
+        print(f"\n⚖️  [{r['code']}] {r['category']}")
+        print(f"Kaidah: {r['qaidah_ar']}")
+        print(f"Arti  : {r['translation_id']}")
+        if r['source_book']:
+            print(f"Sumber: {r['source_book']}")
+
+def main():
+    parser = argparse.ArgumentParser(description="ngaji CLI — Fast FTS5 Al-Qur'an & 77.906 Hadits Engine")
+    subparsers = parser.add_subparsers(dest="cmd")
+
+    # cari
+    p_cari = subparsers.add_parser("cari", help="Cari matan & terjemahan hadits dengan FTS5")
+    p_cari.add_argument("keyword", help="Kata kunci pencarian (misal: 'niat', 'jual beli', 'puasa')")
+    p_cari.add_argument("--limit", type=int, default=5, help="Jumlah hasil (default: 5)")
+    p_cari.set_defaults(func=cmd_cari_hadits)
+
+    # hadits
+    p_hadits = subparsers.add_parser("hadits", help="Buka hadits spesifik berdasarkan nama kitab & nomor")
+    p_hadits.add_argument("kitab", help="Nama kitab (bukhari, muslim, tirmidzi, abu-dawud, ahmad, nasai, dll)")
+    p_hadits.add_argument("nomor", type=int, help="Nomor urut hadits")
+    p_hadits.set_defaults(func=cmd_baca_hadits)
+
+    # quran
+    p_quran = subparsers.add_parser("quran", help="Buka ayat Al-Qur'an berdasarkan Surah dan Ayat")
+    p_quran.add_argument("surah", type=int, help="Nomor Surah (1-114)")
+    p_quran.add_argument("ayat", type=int, help="Nomor Ayat")
+    p_quran.set_defaults(func=cmd_baca_quran)
+
+    # cari-quran
+    p_cq = subparsers.add_parser("cari-quran", help="Cari kata kunci dalam terjemahan Al-Qur'an")
+    p_cq.add_argument("keyword", help="Kata kunci pencarian ayat")
+    p_cq.add_argument("--limit", type=int, default=5, help="Jumlah hasil")
+    p_cq.set_defaults(func=cmd_cari_quran)
+
+    # qawaid
+    p_qaw = subparsers.add_parser("qawaid", help="Kaidah Fikih mu'tabar")
+    p_qaw.add_argument("keyword", nargs="?", default="", help="Kata kunci pencarian kaidah fikih")
+    p_qaw.set_defaults(func=cmd_qawaid)
+
+    args = parser.parse_args()
+    if not hasattr(args, "func"):
+        parser.print_help()
+        sys.exit(0)
+    args.func(args)
+
+if __name__ == "__main__":
+    main()
